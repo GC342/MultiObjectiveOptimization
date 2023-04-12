@@ -1,7 +1,8 @@
 import os
 import torch
 import numpy as np
-import scipy.misc as m
+#import scipy.misc as m
+import imageio.v2 as m
 import re
 import glob
 
@@ -49,9 +50,9 @@ class CELEBA(data.Dataset):
                 selected_files =  list(filter(lambda x:x.split(' ')[1]=='2', fl))
             selected_file_names = list(map(lambda x:re.sub('jpg', 'png', x.split(' ')[0]), selected_files))
         
-        base_path = '/'.join(self.all_files[0].split('/')[:-1])
-        self.files[self.split] = list(map(lambda x: '/'.join([base_path, x]), set(map(lambda x:x.split('/')[-1], self.all_files)).intersection(set(selected_file_names))))
-        self.labels[self.split] = list(map(lambda x: label_map[x], set(map(lambda x:x.split('/')[-1], self.all_files)).intersection(set(selected_file_names))))
+        base_path = '/'.join(self.all_files[0].split('/')[:-1])+"/img_align_celeba_png"
+        self.files[self.split] = list(map(lambda x: '/'.join([base_path, x]), set(map(lambda x:x.split('\\')[-1], self.all_files)).intersection(set(selected_file_names))))
+        self.labels[self.split] = list(map(lambda x: label_map[x], set(map(lambda x:x.split('\\')[-1], self.all_files)).intersection(set(selected_file_names))))
         self.class_names = ['5_o_Clock_Shadow', 'Arched_Eyebrows', 'Attractive', 'Bags_Under_Eyes', 'Bald', 'Bangs',
                                 'Big_Lips', 'Big_Nose', 'Black_Hair', 'Blond_Hair', 'Blurry', 'Brown_Hair', 'Bushy_Eyebrows',      
                                 'Chubby', 'Double_Chin', 'Eyeglasses', 'Goatee', 'Gray_Hair', 'Heavy_Makeup', 'High_Cheekbones',       
@@ -92,7 +93,7 @@ class CELEBA(data.Dataset):
         img = img[:, :, ::-1]
         img = img.astype(np.float64)
         img -= self.mean
-        img = m.imresize(img, (self.img_size[0], self.img_size[1]))
+        img = np.resize(img,(self.img_size[0], self.img_size[1], 3))
         # Resize scales images from 0 to 255, thus we need
         # to divide by 255.0
         img = img.astype(float) / 255.0
@@ -106,7 +107,7 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
 
 
-    local_path = 'CELEB_A_PATH'
+    local_path = 'E:/553FinalProject'
     dst = CELEBA(local_path, is_transform=True, augmentations=None)
     bs = 4
     trainloader = data.DataLoader(dst, batch_size=bs, num_workers=0)
