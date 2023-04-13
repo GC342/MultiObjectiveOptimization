@@ -64,6 +64,8 @@ class MinNormSolver:
         m = len(y)
         sorted_y = np.flip(np.sort(y), axis=0)
         tmpsum = 0.0
+        if torch.is_tensor(y):
+            y = y.numpy()
         tmax_f = (np.sum(y) - 1.0)/m
         for i in range(m-1):
             tmpsum+= sorted_y[i]
@@ -78,14 +80,14 @@ class MinNormSolver:
         tm1 = -1.0*cur_val[proj_grad<0]/proj_grad[proj_grad<0]
         tm2 = (1.0 - cur_val[proj_grad>0])/(proj_grad[proj_grad>0])
         
-        skippers = np.sum(tm1<1e-7) + np.sum(tm2<1e-7)
+        #skippers = np.sum(tm1<1e-7) + np.sum(tm2<1e-7)
         t = 1
         if len(tm1[tm1>1e-7]) > 0:
-            t = np.min(tm1[tm1>1e-7])
+            t = np.min(np.ravel(tm1[tm1>1e-7]))
         if len(tm2[tm2>1e-7]) > 0:
-            t = min(t, np.min(tm2[tm2>1e-7]))
+            t = np.min([t, np.min(np.ravel(tm2[tm2>1e-7]))])
 
-        next_point = proj_grad*t + cur_val
+        next_point = np.add(proj_grad*t, cur_val)
         next_point = MinNormSolver._projection2simplex(next_point)
         return next_point
 
@@ -132,6 +134,7 @@ class MinNormSolver:
             nc, nd = MinNormSolver._min_norm_element_from2(v1v1, v1v2, v2v2)
             new_sol_vec = nc*sol_vec + (1-nc)*new_point
             change = new_sol_vec - sol_vec
+            change = change.numpy()
             if np.sum(np.abs(change)) < MinNormSolver.STOP_CRIT:
                 return sol_vec, nd
             sol_vec = new_sol_vec
