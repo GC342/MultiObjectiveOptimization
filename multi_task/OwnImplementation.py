@@ -2,6 +2,7 @@ import torch
 import torch.optim as optim
 import json
 import datetime
+from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
 from tensorboardX import SummaryWriter
@@ -24,7 +25,7 @@ def train_multi_task(param_file):
     train_loader, train_dst, val_loader, val_dst, loss_fn, metric, model = prepare_data_and_model(params, configs)
     optimizer = create_optimizer(params, model)
 
-    main_training_loop(params, configs, writer, train_loader, val_loader, model, loss_fn, metric, optimizer)
+    main_training_loop(params, configs, writer, train_loader, val_loader, val_dst, model, loss_fn, metric, optimizer)
     writer.close()
 
 
@@ -74,11 +75,11 @@ def create_optimizer(params, model):
         raise ValueError(f'Unsupported optimizer: {optimizer_type}')
 
 
-def main_training_loop(params, configs, writer, train_loader, val_loader, model, loss_fn, metric, optimizer):
+def main_training_loop(params, configs, writer, train_loader, val_loader, val_dst, model, loss_fn, metric, optimizer):
     tasks = params['tasks']
     all_tasks = configs[params['dataset']]['all_tasks']
 
-    for epoch in range(NUM_EPOCHS):
+    for epoch in tqdm(range(NUM_EPOCHS)):
         start = timer()
 
         # Update learning rate every 10 epochs
@@ -87,10 +88,10 @@ def main_training_loop(params, configs, writer, train_loader, val_loader, model,
                 param_group['lr'] *= 0.85
 
         # Train the model
-        train_single_epoch(epoch, tasks, all_tasks, train_loader, model, loss_fn, optimizer, params, writer)
+        train_single_epoch(epoch, tasks, train_loader, model, loss_fn, optimizer, params, writer)
 
         # Evaluate the model
-        evaluate_model(epoch, tasks, all_tasks, val_loader, model, loss_fn, metric, writer)
+        validate_model(epoch, tasks, val_loader, val_dst, model, loss_fn, metric, writer)
 
         # Save the model every 3 epochs
         if epoch % 3 == 0:
@@ -99,8 +100,15 @@ def main_training_loop(params, configs, writer, train_loader, val_loader, model,
         end = timer()
         print(f'Epoch {epoch} ended in {end - start:.2f}s')
 
-def train_single_epoch(epoch, tasks, all_tasks, train_loader, model, loss_fn, optimizer, params, writer):
+
+def train_single_epoch(epoch, tasks, train_loader, model, loss_fn, optimizer, params, writer):
     print(f'Epoch {epoch} Started')
+
+    mask = None
+    masks = {}
+    loss_data = {}
+    grads = {}
+    scale = {}
 
     for m in model.values():
         m.train()
@@ -111,43 +119,107 @@ def train_single_epoch(epoch, tasks, all_tasks, train_loader, model, loss_fn, op
         images = Variable(batch[0].cuda())
 
         labels = {t: Variable(batch[i + 1].cuda()) for i, t in enumerate(tasks)}
-        logits = {t: model[t](images) for t in tasks}
 
-        losses = {t: loss_fn[t](logits[t], labels[t]) for t in tasks}
-        total_loss = sum(losses.values())
+        with torch.no_grad():
+            images_no_grad = Variable(images.data)
+
+        rep, mask = model['rep'](images_no_grad, mask)
+
+        if isinstance(rep, list):
+            # This is a hack to handle psp-net
+            rep = rep[0]
+            rep_variable = [Variable(rep.data.clone(), requires_grad=True)]
+            list_rep = True
+        else:
+            rep_variable = Variable(rep.data.clone(), requires_grad=True)
+            list_rep = False
+
+        for t in tasks:
+            optimizer.zero_grad()
+            out_t, masks[t] = model[t](rep_variable, None)
+            loss = loss_fn[t](out_t, labels[t])
+            loss_data[t] = loss.item()
+            loss.backward()
+            grads[t] = []
+
+            if list_rep:
+                grads[t].append(Variable(rep_variable[0].grad.data.clone(), requires_grad=False))
+                rep_variable[0].grad.data.zero_()
+            else:
+                grads[t].append(Variable(rep_variable.grad.data.clone(), requires_grad=False))
+                rep_variable.grad.data.zero_()
+
+        gn = gradient_normalizers(grads, loss_data, params['normalization_type'])
+        for t in tasks:
+            for gr_i in range(len(grads[t])):
+                grads[t][gr_i] = grads[t][gr_i] / gn[t]
+
+        # Frank-Wolfe iteration to compute scales.
+        sol, min_norm = MinNormSolver.find_min_norm_element([grads[t] for t in tasks])
+        for i, t in enumerate(tasks):
+            scale[t] = float(sol[i])
 
         optimizer.zero_grad()
-        total_loss.backward()
+        rep, _ = model['rep'](images, mask)
+        for i, t in enumerate(tasks):
+            out_t, _ = model[t](rep, masks[t])
+            loss_t = loss_fn[t](out_t, labels[t])
+            loss_data[t] = loss_t.item()
+            if i > 0:
+                loss = loss + scale[t] * loss_t
+            else:
+                loss = scale[t] * loss_t
+        loss.backward()
         optimizer.step()
 
-        writer.add_scalars('train/loss', {t: losses[t].item() for t in tasks}, n_iter)
+        writer.add_scalar('training_loss', loss.item(), n_iter)
+        for t in tasks:
+            writer.add_scalar('training_loss_{}'.format(t), loss_data[t], n_iter)
 
-    print(f'Epoch {epoch} Training Loss: {total_loss.item():.4f}')
+    for m in model:
+        model[m].eval()
 
 
-def evaluate_model(epoch, tasks, all_tasks, val_loader, model, loss_fn, metric, writer):
+
+
+def validate_model(epoch, tasks, val_loader, val_dst, model, loss_fn, metric, writer):
     print(f'Epoch {epoch} Evaluation Started')
-
-    for m in model.values():
-        m.eval()
-
     n_iter = 0
-    with torch.no_grad():
-        for batch in val_loader:
-            n_iter += 1
-            images = Variable(batch[0].cuda())
-            labels = {t: Variable(batch[i + 1].cuda()) for i, t in enumerate(tasks)}
-            logits = {t: model[t](images) for t in tasks}
 
-            losses = {t: loss_fn[t](logits[t], labels[t]) for t in tasks}
-            total_loss = sum(losses.values())
+    for m in model:
+        model[m].eval()
 
-            metrics_scores = {t: metric[t](logits[t], labels[t]) for t in tasks}
+    total_loss = {}
+    total_loss['all'] = 0.0
+    met = {}
+    for t in tasks:
+        total_loss[t] = 0.0
+        met[t] = 0.0
 
-            writer.add_scalars('val/loss', {t: losses[t].item() for t in tasks}, n_iter)
-            writer.add_scalars('val/metric', {t: metrics_scores[t].item() for t in tasks}, n_iter)
+    num_val_batches = 0
+    for batch_val in val_loader:
+        n_iter += 1
+        val_images = Variable(batch_val[0].cuda(), volatile=True)
+        labels_val = {}
 
-    print(f'Epoch {epoch} Evaluation Loss: {total_loss.item():.4f}')
+        labels_val = {t: Variable(batch_val[i + 1].cuda()) for i, t in enumerate(tasks)}
+
+        val_rep, _ = model['rep'](val_images, None)
+        for t in tasks:
+            out_t_val, _ = model[t](val_rep, None)
+            loss_t = loss_fn[t](out_t_val, labels_val[t])
+            total_loss['all'] += loss_t.data[0]
+            total_loss[t] += loss_t.data[0]
+            metric[t].update(out_t_val, labels_val[t])
+        num_val_batches += 1
+
+    for t in tasks:
+        writer.add_scalar('validation_loss_{}'.format(t), total_loss[t] / num_val_batches, n_iter)
+        metric_results = metric[t].get_result()
+        for metric_key in metric_results:
+            writer.add_scalar('metric_{}_{}'.format(metric_key, t), metric_results[metric_key], n_iter)
+        metric[t].reset()
+    writer.add_scalar('validation_loss', total_loss['all'] / len(val_dst), n_iter)
 
 
 def save_model(params, epoch, model, optimizer):
