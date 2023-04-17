@@ -113,7 +113,8 @@ def train_multi_task(param_file):
                 if approximate_norm_solution:
                     optimizer.zero_grad()
                     # First compute representations (z)
-                    images_volatile = Variable(images.data, volatile=True)
+                    with torch.no_grad():
+                        images_volatile = Variable(images.data)
                     rep, mask = model['rep'](images_volatile, mask)
                     # As an approximate solution we only need gradients for input
                     if isinstance(rep, list):
@@ -187,6 +188,7 @@ def train_multi_task(param_file):
             for t in tasks:
                 writer.add_scalar('training_loss_{}'.format(t), loss_data[t], n_iter)
 
+
         for m in model:
             model[m].eval()
 
@@ -199,21 +201,23 @@ def train_multi_task(param_file):
 
         num_val_batches = 0
         for batch_val in val_loader:
-            val_images = Variable(batch_val[0].cuda(), volatile=True)
+            with torch.no_grad():
+                val_images = Variable(batch_val[0].cuda())
             labels_val = {}
 
             for i, t in enumerate(all_tasks):
                 if t not in tasks:
                     continue
                 labels_val[t] = batch_val[i+1]
-                labels_val[t] = Variable(labels_val[t].cuda(), volatile=True)
+                with torch.no_grad():
+                    labels_val[t] = Variable(labels_val[t].cuda())
 
             val_rep, _ = model['rep'](val_images, None)
             for t in tasks:
                 out_t_val, _ = model[t](val_rep, None)
                 loss_t = loss_fn[t](out_t_val, labels_val[t])
-                tot_loss['all'] += loss_t.data[0]
-                tot_loss[t] += loss_t.data[0]
+                tot_loss['all'] += loss_t.item()
+                tot_loss[t] += loss_t.item()
                 metric[t].update(out_t_val, labels_val[t])
             num_val_batches+=1
 
@@ -234,7 +238,7 @@ def train_multi_task(param_file):
                 key_name = 'model_{}'.format(t)
                 state[key_name] = model[t].state_dict()
 
-            torch.save(state, "saved_models/{}_{}_model.pkl".format(params['exp_id'], epoch+1))
+            torch.save(state, "saved_models/{}_{}_model.pkl".format(datetime.datetime.now().strftime("%I.%M%p on %B %d, %Y"), 1))
 
         end = timer()
         print('Epoch ended in {}s'.format(end - start))
